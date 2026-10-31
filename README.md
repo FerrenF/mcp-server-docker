@@ -187,12 +187,19 @@ For safety reasons, this MCP server doesn't support sensitive Docker options
 like `--privileged` or `--cap-add/--cap-drop`. If these features are of interest
 to you, file an issue on this repository with your use-case.
 
-### Executing Commands
+### Managed Resources
 
-`exec_container` only runs commands in containers created by this server.
-Containers created by `create_container`, `run_container` and
-`recreate_container` are given the `mcp-server-docker.managed=true` label, and
-`exec_container` refuses any container without it.
+This server only lists, removes, recreates and runs commands in containers and
+volumes that it created. Resources created by `create_container`,
+`run_container`, `recreate_container` and `create_volume` are given the
+`mcp-server-docker.managed=true` label:
+
+- `list_containers` and `list_volumes` only return resources with the label
+- `remove_container`, `recreate_container`, `exec_container` and
+  `remove_volume` refuse resources without it
+
+Containers and volumes created some other way, such as with the Docker CLI, or
+volumes Docker creates implicitly when running a container, are left alone.
 
 ## 🛠️ Configuration
 

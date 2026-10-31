@@ -96,10 +96,24 @@ def _client(ctx: Context[AppContext]) -> docker.DockerClient:
 
 
 def _managed_labels(labels: dict[str, str] | list[str] | None) -> dict[str, str]:
-    """Mark a container as created by this server, keeping any other labels."""
+    """Mark a resource as created by this server, keeping any other labels."""
     if isinstance(labels, list):
         labels = dict.fromkeys(labels, "")
     return {**(labels or {}), MANAGED_LABEL: "true"}
+
+
+def _managed_filters(filters: BaseModel | None) -> dict[str, Any]:
+    """Limit a listing to resources created by this server."""
+    result = filters.model_dump(exclude_none=True) if filters else {}
+    result["label"] = [*result.get("label", []), f"{MANAGED_LABEL}=true"]
+    return result
+
+
+def _require_managed(labels: dict[str, str] | None, resource: str) -> None:
+    if (labels or {}).get(MANAGED_LABEL) != "true":
+        raise ValueError(
+            f"{resource} was not created by this server; only resources created by this server can be used"
+        )
 
 
 @asynccontextmanager
@@ -256,7 +270,7 @@ def container_stats(container_id: str, ctx: Context) -> dict[str, Any]:
 
 
 @app.tool(
-    description="List all Docker containers",
+    description="List Docker containers created by this server",
     annotations=ToolAnnotations(
         read_only_hint=True, idempotent_hint=True, open_world_hint=False
     ),
@@ -273,7 +287,7 @@ def list_containers(
     return [
         docker_to_dict(container)
         for container in _client(ctx).containers.list(
-            all=all, filters=filters.model_dump(exclude_none=True) if filters else None
+            all=all, filters=_managed_filters(filters)
         )
     ]
 
@@ -393,7 +407,7 @@ def run_container(
 
 
 @app.tool(
-    description="Stop and remove a container, then run a new container. Fails if the container does not exist.",
+    description="Stop and remove a container, then run a new container. Fails if the container does not exist or was not created by this server.",
     annotations=ToolAnnotations(
         destructive_hint=True, idempotent_hint=False, open_world_hint=False
     ),
@@ -418,6 +432,8 @@ def recreate_container(
             "container_id or name is required for identifying the container to stop+remove"
         )
     old = _client(ctx).containers.get(container_id or name)
+    old_config: dict[str, Any] = old.attrs.get("Config") or {}
+    _require_managed(old_config.get("Labels"), f"Container {container_id or name}")
     old.stop()
     old.remove()
     return docker_to_dict(
@@ -493,10 +509,7 @@ def exec_container(
 ) -> dict[str, Any]:
     container = _client(ctx).containers.get(container_id)
     config: dict[str, Any] = container.attrs.get("Config") or {}
-    if (config.get("Labels") or {}).get(MANAGED_LABEL) != "true":
-        raise ValueError(
-            f"Container {container_id} was not created by this server; exec is only allowed on containers created by this server"
-        )
+    _require_managed(config.get("Labels"), f"Container {container_id}")
     exit_code, output = container.exec_run(
         command, workdir=workdir, environment=environment
     )
@@ -521,7 +534,7 @@ def stop_container(
 
 
 @app.tool(
-    description="Remove a Docker container",
+    description="Remove a Docker container. Only works on containers created by this server.",
     annotations=ToolAnnotations(
         destructive_hint=True, idempotent_hint=False, open_world_hint=False
     ),
@@ -532,6 +545,8 @@ def remove_container(
     force: Annotated[bool, Field(description="Force remove the container")] = False,
 ) -> dict[str, Any]:
     container = _client(ctx).containers.get(container_id)
+    config: dict[str, Any] = container.attrs.get("Config") or {}
+    _require_managed(config.get("Labels"), f"Container {container_id}")
     container.remove(force=force)
     return docker_to_dict(container, {"status": "removed"})
 
@@ -682,13 +697,16 @@ def remove_network(
 
 
 @app.tool(
-    description="List Docker volumes",
+    description="List Docker volumes created by this server",
     annotations=ToolAnnotations(
         read_only_hint=True, idempotent_hint=True, open_world_hint=False
     ),
 )
 def list_volumes(ctx: Context[AppContext]) -> list[dict[str, Any]]:
-    return [docker_to_dict(volume) for volume in _client(ctx).volumes.list()]
+    return [
+        docker_to_dict(volume)
+        for volume in _client(ctx).volumes.list(filters=_managed_filters(None))
+    ]
 
 
 @app.tool(
@@ -704,12 +722,14 @@ def create_volume(
     labels: Annotated[dict[str, str] | None, Field(description="Volume labels")] = None,
 ) -> dict[str, Any]:
     return docker_to_dict(
-        _client(ctx).volumes.create(name=name, driver=driver, labels=labels)
+        _client(ctx).volumes.create(
+            name=name, driver=driver, labels=_managed_labels(labels)
+        )
     )
 
 
 @app.tool(
-    description="Remove a Docker volume",
+    description="Remove a Docker volume. Only works on volumes created by this server.",
     annotations=ToolAnnotations(
         destructive_hint=True, idempotent_hint=False, open_world_hint=False
     ),
@@ -720,5 +740,6 @@ def remove_volume(
     force: Annotated[bool, Field(description="Force remove the volume")] = False,
 ) -> dict[str, Any]:
     volume = _client(ctx).volumes.get(volume_name)
+    _require_managed(volume.attrs.get("Labels"), f"Volume {volume_name}")
     volume.remove(force=force)
     return docker_to_dict(volume)

@@ -18,6 +18,23 @@ Do not use them when the user only wants Docker knowledge or files, such as
 explaining a command, or writing a Dockerfile or compose file they will run
 themselves. If you're unsure whether they want you to act, ask.
 
+## What you can see and change
+
+The server only manages containers and volumes that were created through these
+tools. It labels them `mcp-server-docker.managed=true` automatically, so you
+never need to add that label yourself.
+
+- `list_containers` and `list_volumes` only return containers and volumes
+  created through these tools. Others exist on the host but stay hidden.
+- `remove_container`, `recreate_container`, `exec_container` and
+  `remove_volume` refuse anything else, with an error saying it
+  `was not created by this server`.
+- Images and networks aren't restricted.
+
+If the user asks about a container or volume you can't see, or a tool refuses
+one, tell them it wasn't created through these tools and that you can't manage
+it. Don't look for ways around this.
+
 ## Ground rules
 
 1. **Check state first.** Before changing anything, call the matching `list_*`
@@ -44,17 +61,14 @@ themselves. If you're unsure whether they want you to act, ask.
 
 ## Filtering listings
 
-### Label everything you create
+### Label project resources
 
 Networks can only be filtered by label, and labels are the only way to find
-all of a project's resources at once. So label every container, network and
-volume you create:
+all of a project's resources at once. When the work belongs to a named project
+or app, add `project=<project-name>` to every container, network and volume
+you create. Use a short lowercase name, such as `blog`.
 
-- Always add `managed-by=open-webui`.
-- When the work belongs to a named project or app, also add
-  `project=<project-name>`. Use a short lowercase name, such as `blog`.
-
-For example: `labels={"managed-by": "open-webui", "project": "blog"}`.
+For example: `labels={"project": "blog"}`.
 
 ### Filters for each tool
 
@@ -69,7 +83,7 @@ For example: `labels={"managed-by": "open-webui", "project": "blog"}`.
 | `list_containers` | `label` | `label=["project=blog"]` |
 | `list_containers` | `all=false` (the default), to show running containers only | |
 | `list_networks` | `label` | `label=["project=blog"]` |
-| `list_volumes` | No filters. Call it only when you need a volume's details, and only once. | |
+| `list_volumes` | No filters. It returns only the volumes created through these tools, so the list stays short. | |
 
 ### Rules
 
@@ -83,8 +97,8 @@ For example: `labels={"managed-by": "open-webui", "project": "blog"}`.
 - **`name` matches part of a name,** so `name=["web"]` also returns
   `webapp`. Check the exact `name` field of each result.
 - **Call `list_containers` with no filters only when the user asks for
-  everything.** Do it at most once per task, and reuse that result instead of
-  listing again.
+  everything you manage.** Do it at most once per task, and reuse that result
+  instead of listing again.
 - **Don't list to look up an exact name.** If you already know the container
   name, pass it straight to `start_container`, `stop_container` or
   `fetch_container_logs`. They accept a name as well as an ID.
@@ -106,6 +120,9 @@ For example: `labels={"managed-by": "open-webui", "project": "blog"}`.
    - If the name is already taken, even by a stopped container, ask the user
      whether to reuse it, replace it (see "Update a container") or pick a
      different name.
+   - A container created outside these tools can hold the name without
+     appearing in the list. If `run_container` then fails with a name conflict,
+     tell the user and ask for a different name.
 3. **Dependencies:**
    - If the container needs a network, call `list_networks` with a project
      label, and create the network with `create_network` and the same labels if
@@ -142,9 +159,11 @@ Use `recreate_container`. Don't do `stop_container`, `remove_container`, then
 - To remove: confirm with the user, call `stop_container` first, then
   `remove_container`. A running container can't be removed without `force=true`.
 - To remove an image: first check that no container uses it, including stopped
-  ones. Call `list_containers` with `all=true` and `ancestor=["<image>"]`; an
-  empty result means nothing uses it. An image that any container uses can't
-  be removed without `force=true`.
+  ones. Call `list_containers` with `all=true` and `ancestor=["<image>"]`.
+  An empty result only means none of *your* containers use it. If
+  `remove_image` then fails, a container created outside these tools is
+  probably using the image, so tell the user and don't retry with
+  `force=true`.
 - To clean up a project: find its resources with `label=["project=<name>"]` on
   `list_containers` (with `all=true`) and `list_networks`. Remove them in
   reverse dependency order: app containers, then database containers, then
@@ -164,17 +183,13 @@ Use `recreate_container`. Don't do `stop_container`, `remove_container`, then
 
 ### Run a command inside a container
 
-Use `exec_container`. It only works on containers created through these tools,
-which carry the `mcp-server-docker.managed=true` label. Any other container is
-refused with `was not created by this server`.
+Use `exec_container`. Like the other tools, it only works on containers created
+through these tools.
 
-1. **Check the container:** call `list_containers` with `name=["<name>"]` and
-   `label=["mcp-server-docker.managed=true"]`. If nothing comes back, the
-   container either isn't running or wasn't created by these tools. Tell the
-   user which it is.
-   - If the container wasn't created by these tools, don't recreate it just to
-     get exec access. Recreating replaces the container, so offer it only as an
-     option and let the user decide.
+1. **Check the container:** call `list_containers` with `name=["<name>"]`.
+   If nothing comes back, either the container isn't running or it wasn't
+   created through these tools. Call it again with `all=true` to find out which,
+   and tell the user.
 2. **Ask first if the command changes anything,** such as deleting files,
    installing packages, editing config, running migrations or restarting
    processes. You don't need to ask for read-only commands like `ls`, `cat`,
@@ -210,7 +225,7 @@ The tool definitions are terse, so use these exact shapes:
 | `volumes`, dict form | Volume name or host path mapped to bind path and mode | `{"pgdata": {"bind": "/var/lib/postgresql/data", "mode": "rw"}}` |
 | `volumes`, list form | `"source:target:mode"` strings | `["pgdata:/var/lib/postgresql/data:rw"]` |
 | `environment` | String keys and string values | `{"POSTGRES_PASSWORD": "secret"}` |
-| `labels` | Dict, or list of label keys | `{"managed-by": "open-webui", "project": "blog"}` |
+| `labels` | Dict, or list of label keys | `{"project": "blog"}` |
 | `label` filter | `key` or `key=value` strings | `["project=blog"]` |
 | `command`, `entrypoint` | A single string | `"nginx -g 'daemon off;'"` |
 

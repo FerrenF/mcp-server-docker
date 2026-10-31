@@ -189,7 +189,7 @@ class Tools:
         ] = Field(None, description="Filter by container status"),
     ) -> str:
         """
-        List all Docker containers
+        List Docker containers created by this server
         """
         filters = {
             key: value
@@ -325,7 +325,7 @@ class Tools:
         ),
     ) -> str:
         """
-        Stop and remove a container, then run a new container. Fails if the container does not exist.
+        Stop and remove a container, then run a new container. Fails if the container does not exist or was not created by this server.
         """
         return self._call(
             "recreate_container",
@@ -403,7 +403,7 @@ class Tools:
         force: bool = Field(False, description="Force remove the container"),
     ) -> str:
         """
-        Remove a Docker container
+        Remove a Docker container. Only works on containers created by this server.
         """
         return self._call("remove_container", container_id=container_id, force=force)
 
@@ -516,7 +516,7 @@ class Tools:
 
     def list_volumes(self) -> str:
         """
-        List Docker volumes
+        List Docker volumes created by this server
         """
         return self._call("list_volumes")
 
@@ -537,6 +537,6 @@ class Tools:
         force: bool = Field(False, description="Force remove the volume"),
     ) -> str:
         """
-        Remove a Docker volume
+        Remove a Docker volume. Only works on volumes created by this server.
         """
         return self._call("remove_volume", volume_name=volume_name, force=force)

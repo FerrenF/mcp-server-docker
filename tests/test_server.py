@@ -17,7 +17,12 @@ class Object:
     status = "running"
     image = None
     ports: ClassVar = {}
-    attrs: ClassVar = {"Config": {}, "State": {}, "NetworkSettings": {}}
+    attrs: ClassVar = {
+        "Config": {"Labels": {"mcp-server-docker.managed": "true"}},
+        "Labels": {"mcp-server-docker.managed": "true"},
+        "State": {},
+        "NetworkSettings": {},
+    }
 
     def __init__(self, calls: list[tuple[str, Any]]):
         self.calls = calls
@@ -146,13 +151,16 @@ async def test_tools_have_flat_schemas_and_container_call_semantics(
         assert remove.annotations.open_world_hint is False
 
         await client.call_tool("list_containers", {})
-        assert docker_client.call("containers.list") == {"all": False, "filters": None}
+        assert docker_client.call("containers.list") == {
+            "all": False,
+            "filters": {"label": ["mcp-server-docker.managed=true"]},
+        }
         await client.call_tool(
             "list_containers", {"all": True, "filters": {"label": ["a=b"]}}
         )
         assert docker_client.call("containers.list") == {
             "all": True,
-            "filters": {"label": ["a=b"]},
+            "filters": {"label": ["a=b", "mcp-server-docker.managed=true"]},
         }
         await client.call_tool(
             "list_containers",
@@ -170,6 +178,7 @@ async def test_tools_have_flat_schemas_and_container_call_semantics(
                 "name": ["web"],
                 "ancestor": ["nginx:latest"],
                 "status": ["exited"],
+                "label": ["mcp-server-docker.managed=true"],
             },
         }
         assert (
@@ -218,7 +227,7 @@ async def test_tools_have_flat_schemas_and_container_call_semantics(
 
 
 @pytest.mark.anyio
-async def test_exec_is_limited_to_containers_created_by_the_server(
+async def test_existing_resources_are_limited_to_those_created_by_the_server(
     server, docker_client, monkeypatch
 ):
     async with Client(server, raise_exceptions=True) as client:
@@ -242,21 +251,6 @@ async def test_exec_is_limited_to_containers_created_by_the_server(
             "mcp-server-docker.managed": "true",
         }
 
-        before = len(docker_client.calls)
-        result = await client.call_tool(
-            "exec_container", {"container_id": "x", "command": "echo hello"}
-        )
-        assert result.is_error
-        assert "not created by this server" in result.content[0].text
-        assert "object.exec_run" not in [
-            name for name, _ in docker_client.calls[before:]
-        ]
-
-        monkeypatch.setattr(
-            Object,
-            "attrs",
-            {"Config": {"Labels": {"mcp-server-docker.managed": "true"}}},
-        )
         result = await client.call_tool(
             "exec_container",
             {"container_id": "x", "command": ["echo", "hello"], "workdir": "/tmp"},
@@ -266,6 +260,21 @@ async def test_exec_is_limited_to_containers_created_by_the_server(
             ["echo", "hello"],
             {"workdir": "/tmp", "environment": None},
         )
+
+        monkeypatch.setattr(Object, "attrs", {"Config": {}, "NetworkSettings": {}})
+        for tool, arguments in [
+            ("exec_container", {"container_id": "x", "command": "echo hello"}),
+            ("remove_container", {"container_id": "x"}),
+            ("recreate_container", {"image": "alpine", "name": "x"}),
+            ("remove_volume", {"volume_name": "v"}),
+        ]:
+            before = len(docker_client.calls)
+            result = await client.call_tool(tool, arguments)
+            assert result.is_error
+            assert "not created by this server" in result.content[0].text
+            assert [name for name, _ in docker_client.calls[before:]] == [
+                "volumes.get" if tool == "remove_volume" else "containers.get"
+            ]
 
 
 @pytest.mark.anyio
@@ -316,12 +325,14 @@ async def test_image_network_and_volume_call_semantics(server, docker_client):
             ("object.remove", {}),
         ]
         await client.call_tool("list_volumes", {})
-        assert docker_client.call("volumes.list") == {}
-        await client.call_tool("create_volume", {"name": "v"})
+        assert docker_client.call("volumes.list") == {
+            "filters": {"label": ["mcp-server-docker.managed=true"]}
+        }
+        await client.call_tool("create_volume", {"name": "v", "labels": {"a": "b"}})
         assert docker_client.call("volumes.create") == {
             "name": "v",
             "driver": "local",
-            "labels": None,
+            "labels": {"a": "b", "mcp-server-docker.managed": "true"},
         }
         await client.call_tool("remove_volume", {"volume_name": "v", "force": True})
         assert docker_client.call("object.remove") == {"force": True}
