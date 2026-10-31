@@ -140,6 +140,7 @@ Read either URI with a Docker container ID or name.
 - `recreate_container`
 - `start_container`
 - `fetch_container_logs`
+- `exec_container`
 - `stop_container`
 - `remove_container`
 
@@ -185,6 +186,13 @@ through Docker.
 For safety reasons, this MCP server doesn't support sensitive Docker options
 like `--privileged` or `--cap-add/--cap-drop`. If these features are of interest
 to you, file an issue on this repository with your use-case.
+
+### Executing Commands
+
+`exec_container` only runs commands in containers created by this server.
+Containers created by `create_container`, `run_container` and
+`recreate_container` are given the `mcp-server-docker.managed=true` label, and
+`exec_container` refuses any container without it.
 
 ## 🛠️ Configuration
 

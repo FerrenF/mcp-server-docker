@@ -39,6 +39,10 @@ class Object:
     def remove(self, **kwargs):
         self.calls.append(("object.remove", kwargs))
 
+    def exec_run(self, cmd, **kwargs):
+        self.calls.append(("object.exec_run", (cmd, kwargs)))
+        return 0, b"hello\n"
+
 
 class Collection:
     def __init__(self, calls: list[tuple[str, Any]], name: str):
@@ -123,7 +127,7 @@ async def test_tools_have_flat_schemas_and_container_call_semantics(
 ):
     async with Client(server, raise_exceptions=True) as client:
         tools = await client.list_tools()
-        assert len(tools.tools) == 19
+        assert len(tools.tools) == 20
         create = next(tool for tool in tools.tools if tool.name == "create_container")
         assert create.input_schema["required"] == ["image"]
         assert "ctx" not in create.input_schema["properties"]
@@ -150,6 +154,29 @@ async def test_tools_have_flat_schemas_and_container_call_semantics(
             "all": True,
             "filters": {"label": ["a=b"]},
         }
+        await client.call_tool(
+            "list_containers",
+            {
+                "filters": {
+                    "name": ["web"],
+                    "ancestor": ["nginx:latest"],
+                    "status": ["exited"],
+                }
+            },
+        )
+        assert docker_client.call("containers.list") == {
+            "all": False,
+            "filters": {
+                "name": ["web"],
+                "ancestor": ["nginx:latest"],
+                "status": ["exited"],
+            },
+        }
+        assert (
+            await client.call_tool(
+                "list_containers", {"filters": {"status": ["stopped"]}}
+            )
+        ).is_error
         await client.call_tool(
             "create_container",
             {"image": "alpine", "name": "new", "environment": {"X": "1"}},
@@ -191,6 +218,57 @@ async def test_tools_have_flat_schemas_and_container_call_semantics(
 
 
 @pytest.mark.anyio
+async def test_exec_is_limited_to_containers_created_by_the_server(
+    server, docker_client, monkeypatch
+):
+    async with Client(server, raise_exceptions=True) as client:
+        await client.call_tool("run_container", {"image": "alpine"})
+        assert docker_client.call("containers.run")["labels"] == {
+            "mcp-server-docker.managed": "true"
+        }
+        await client.call_tool(
+            "create_container",
+            {"image": "alpine", "labels": {"a": "b", "mcp-server-docker.managed": "x"}},
+        )
+        assert docker_client.call("containers.create")["labels"] == {
+            "a": "b",
+            "mcp-server-docker.managed": "true",
+        }
+        await client.call_tool(
+            "recreate_container", {"image": "alpine", "name": "old", "labels": ["a"]}
+        )
+        assert docker_client.call("containers.run")["labels"] == {
+            "a": "",
+            "mcp-server-docker.managed": "true",
+        }
+
+        before = len(docker_client.calls)
+        result = await client.call_tool(
+            "exec_container", {"container_id": "x", "command": "echo hello"}
+        )
+        assert result.is_error
+        assert "not created by this server" in result.content[0].text
+        assert "object.exec_run" not in [
+            name for name, _ in docker_client.calls[before:]
+        ]
+
+        monkeypatch.setattr(
+            Object,
+            "attrs",
+            {"Config": {"Labels": {"mcp-server-docker.managed": "true"}}},
+        )
+        result = await client.call_tool(
+            "exec_container",
+            {"container_id": "x", "command": ["echo", "hello"], "workdir": "/tmp"},
+        )
+        assert result.structured_content == {"exit_code": 0, "output": ["hello", ""]}
+        assert docker_client.call("object.exec_run") == (
+            ["echo", "hello"],
+            {"workdir": "/tmp", "environment": None},
+        )
+
+
+@pytest.mark.anyio
 async def test_image_network_and_volume_call_semantics(server, docker_client):
     async with Client(server, raise_exceptions=True) as client:
         await client.call_tool("list_images", {})
@@ -206,7 +284,7 @@ async def test_image_network_and_volume_call_semantics(server, docker_client):
         assert docker_client.call("images.list") == {
             "name": "alpine",
             "all": True,
-            "filters": {"dangling": True, "label": None},
+            "filters": {"dangling": True},
         }
         await client.call_tool("pull_image", {"repository": "alpine", "tag": "3.20"})
         assert docker_client.call("images.pull") == ("alpine", {"tag": "3.20"})

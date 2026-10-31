@@ -27,6 +27,27 @@ class ListContainersFilters(BaseModel):
     label: list[str] | None = Field(
         None, description="Filter by label, either `key` or `key=value` format"
     )
+    name: list[str] | None = Field(
+        None, description="Filter by container name (matches part of the name)"
+    )
+    ancestor: list[str] | None = Field(
+        None,
+        description="Filter by image the container was created from, either `image`, `image:tag`, or image ID",
+    )
+    status: (
+        list[
+            Literal[
+                "created",
+                "restarting",
+                "running",
+                "removing",
+                "paused",
+                "exited",
+                "dead",
+            ]
+        ]
+        | None
+    ) = Field(None, description="Filter by container status")
 
 
 class ListImagesFilters(BaseModel):
@@ -67,9 +88,18 @@ ContainerLabels = Annotated[
 ]
 AutoRemove = Annotated[bool, Field(description="Automatically remove the container")]
 
+MANAGED_LABEL = "mcp-server-docker.managed"
+
 
 def _client(ctx: Context[AppContext]) -> docker.DockerClient:
     return ctx.request_context.lifespan_context.docker
+
+
+def _managed_labels(labels: dict[str, str] | list[str] | None) -> dict[str, str]:
+    """Mark a container as created by this server, keeping any other labels."""
+    if isinstance(labels, list):
+        labels = dict.fromkeys(labels, "")
+    return {**(labels or {}), MANAGED_LABEL: "true"}
 
 
 @asynccontextmanager
@@ -243,7 +273,7 @@ def list_containers(
     return [
         docker_to_dict(container)
         for container in _client(ctx).containers.list(
-            all=all, filters=filters.model_dump() if filters else None
+            all=all, filters=filters.model_dump(exclude_none=True) if filters else None
         )
     ]
 
@@ -299,7 +329,7 @@ def create_container(
             environment=environment,
             ports=ports,
             volumes=volumes,
-            labels=labels,
+            labels=_managed_labels(labels),
             auto_remove=auto_remove,
         )
     )
@@ -356,7 +386,7 @@ def run_container(
             environment=environment,
             ports=ports,
             volumes=volumes,
-            labels=labels,
+            labels=_managed_labels(labels),
             auto_remove=auto_remove,
         )
     )
@@ -401,7 +431,7 @@ def recreate_container(
             environment=environment,
             ports=ports,
             volumes=volumes,
-            labels=labels,
+            labels=_managed_labels(labels),
             auto_remove=auto_remove,
         )
     )
@@ -441,6 +471,38 @@ def fetch_container_logs(
         .logs(tail=tail)
         .decode("utf-8")
         .split("\n")
+    }
+
+
+@app.tool(
+    description="Execute a command in a running Docker container. Only works on containers created by this server.",
+    annotations=ToolAnnotations(
+        destructive_hint=True, idempotent_hint=False, open_world_hint=False
+    ),
+)
+def exec_container(
+    ctx: Context[AppContext],
+    container_id: ContainerID,
+    command: Annotated[
+        str | list[str], Field(description="Command to run in the container")
+    ],
+    workdir: Annotated[
+        str | None, Field(description="Working directory to run the command in")
+    ] = None,
+    environment: Environment = None,
+) -> dict[str, Any]:
+    container = _client(ctx).containers.get(container_id)
+    config: dict[str, Any] = container.attrs.get("Config") or {}
+    if (config.get("Labels") or {}).get(MANAGED_LABEL) != "true":
+        raise ValueError(
+            f"Container {container_id} was not created by this server; exec is only allowed on containers created by this server"
+        )
+    exit_code, output = container.exec_run(
+        command, workdir=workdir, environment=environment
+    )
+    return {
+        "exit_code": exit_code,
+        "output": output.decode("utf-8", errors="replace").split("\n"),
     }
 
 
@@ -495,7 +557,9 @@ def list_images(
     return [
         docker_to_dict(image)
         for image in _client(ctx).images.list(
-            name=name, all=all, filters=filters.model_dump() if filters else None
+            name=name,
+            all=all,
+            filters=filters.model_dump(exclude_none=True) if filters else None,
         )
     ]
 
@@ -575,7 +639,7 @@ def list_networks(
     return [
         docker_to_dict(network)
         for network in _client(ctx).networks.list(
-            filters=filters.model_dump() if filters else None
+            filters=filters.model_dump(exclude_none=True) if filters else None
         )
     ]
 
