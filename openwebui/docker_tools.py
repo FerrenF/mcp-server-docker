@@ -153,8 +153,7 @@ class Tools:
                 for item in result.get("content", [])
                 if item.get("type") == "text"
             )
-        if result.get("isError"):
-            return f"Error from {tool}: {text}"
+        # Error text already starts with "Error executing tool <name>"
         return text
 
     # Containers

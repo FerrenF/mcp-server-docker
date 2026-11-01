@@ -1,7 +1,8 @@
 """MCPServer v2 implementation for Docker."""
 
+import functools
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
@@ -9,6 +10,7 @@ from typing import Annotated, Any, Literal
 import docker
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
@@ -111,9 +113,29 @@ def _managed_filters(filters: BaseModel | None) -> dict[str, Any]:
 
 def _require_managed(labels: dict[str, str] | None, resource: str) -> None:
     if (labels or {}).get(MANAGED_LABEL) != "true":
-        raise ValueError(
+        raise ToolError(
             f"{resource} was not created by this server; only resources created by this server can be used"
         )
+
+
+def _report_docker_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+    """Report Docker errors to the model as a short message, not a traceback."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return fn(*args, **kwargs)
+        except docker.errors.APIError as e:
+            if e.explanation is None:
+                raise ToolError(str(e)) from e
+            reason = e.response.reason if e.response is not None else None
+            raise ToolError(
+                f"{reason}: {e.explanation}" if reason else e.explanation
+            ) from e
+        except docker.errors.DockerException as e:
+            raise ToolError(str(e)) from e
+
+    return wrapper
 
 
 @asynccontextmanager
@@ -275,6 +297,7 @@ def container_stats(container_id: str, ctx: Context) -> dict[str, Any]:
         read_only_hint=True, idempotent_hint=True, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def list_containers(
     ctx: Context[AppContext],
     all: Annotated[
@@ -298,6 +321,7 @@ def list_containers(
         destructive_hint=False, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def create_container(
     ctx: Context[AppContext],
     image: ImageName,
@@ -355,6 +379,7 @@ def create_container(
         destructive_hint=False, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def run_container(
     ctx: Context[AppContext],
     image: ImageName,
@@ -412,6 +437,7 @@ def run_container(
         destructive_hint=True, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def recreate_container(
     ctx: Context[AppContext],
     image: ImageName,
@@ -428,7 +454,7 @@ def recreate_container(
     auto_remove: AutoRemove = False,
 ) -> dict[str, Any]:
     if container_id is None and name is None:
-        raise ValueError(
+        raise ToolError(
             "container_id or name is required for identifying the container to stop+remove"
         )
     old = _client(ctx).containers.get(container_id or name)
@@ -459,6 +485,7 @@ def recreate_container(
         destructive_hint=False, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def start_container(
     ctx: Context[AppContext], container_id: ContainerID
 ) -> dict[str, Any]:
@@ -473,6 +500,7 @@ def start_container(
         read_only_hint=True, idempotent_hint=True, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def fetch_container_logs(
     ctx: Context[AppContext],
     container_id: ContainerID,
@@ -496,6 +524,7 @@ def fetch_container_logs(
         destructive_hint=True, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def exec_container(
     ctx: Context[AppContext],
     container_id: ContainerID,
@@ -525,6 +554,7 @@ def exec_container(
         destructive_hint=False, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def stop_container(
     ctx: Context[AppContext], container_id: ContainerID
 ) -> dict[str, Any]:
@@ -539,6 +569,7 @@ def stop_container(
         destructive_hint=True, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def remove_container(
     ctx: Context[AppContext],
     container_id: ContainerID,
@@ -557,6 +588,7 @@ def remove_container(
         read_only_hint=True, idempotent_hint=True, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def list_images(
     ctx: Context[AppContext],
     name: Annotated[
@@ -585,6 +617,7 @@ def list_images(
         destructive_hint=False, idempotent_hint=False, open_world_hint=True
     ),
 )
+@_report_docker_errors
 def pull_image(
     ctx: Context[AppContext],
     repository: Annotated[str, Field(description="Image repository")],
@@ -599,6 +632,7 @@ def pull_image(
         destructive_hint=False, idempotent_hint=False, open_world_hint=True
     ),
 )
+@_report_docker_errors
 def push_image(
     ctx: Context[AppContext],
     repository: Annotated[str, Field(description="Image repository")],
@@ -614,6 +648,7 @@ def push_image(
         destructive_hint=False, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def build_image(
     ctx: Context[AppContext],
     path: Annotated[str, Field(description="Path to build context")],
@@ -630,6 +665,7 @@ def build_image(
         destructive_hint=True, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def remove_image(
     ctx: Context[AppContext],
     image: Annotated[str, Field(description="Image ID or name")],
@@ -645,6 +681,7 @@ def remove_image(
         read_only_hint=True, idempotent_hint=True, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def list_networks(
     ctx: Context[AppContext],
     filters: Annotated[
@@ -665,6 +702,7 @@ def list_networks(
         destructive_hint=False, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def create_network(
     ctx: Context[AppContext],
     name: Annotated[str, Field(description="Network name")],
@@ -687,6 +725,7 @@ def create_network(
         destructive_hint=True, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def remove_network(
     ctx: Context[AppContext],
     network_id: Annotated[str, Field(description="Network ID or name")],
@@ -702,6 +741,7 @@ def remove_network(
         read_only_hint=True, idempotent_hint=True, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def list_volumes(ctx: Context[AppContext]) -> list[dict[str, Any]]:
     return [
         docker_to_dict(volume)
@@ -715,6 +755,7 @@ def list_volumes(ctx: Context[AppContext]) -> list[dict[str, Any]]:
         destructive_hint=False, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def create_volume(
     ctx: Context[AppContext],
     name: Annotated[str, Field(description="Volume name")],
@@ -734,6 +775,7 @@ def create_volume(
         destructive_hint=True, idempotent_hint=False, open_world_hint=False
     ),
 )
+@_report_docker_errors
 def remove_volume(
     ctx: Context[AppContext],
     volume_name: Annotated[str, Field(description="Volume name")],

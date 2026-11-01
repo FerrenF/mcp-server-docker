@@ -49,10 +49,18 @@ it. Don't look for ways around this.
    deletes its data for good. Also ask before any `exec_container` command
    that changes the container (see "Run a command inside a container").
 4. **Read errors before acting on them.** A failed call returns
-   `Error from <tool>: ...`, usually followed by Docker's message, such as
-   `No such container: web`. If there's no message after the tool name, don't
-   guess the cause. Use a filtered `list_*` call or `fetch_container_logs` to
-   find out what went wrong.
+   `Error executing tool <tool>: <reason>: <details>`, where `<reason>` is
+   Docker's status. The common ones are:
+   - `Not Found`: the container, image, network or volume doesn't exist. Check
+     the name with a filtered `list_*` call.
+   - `Conflict`: the resource is in use or the name is taken. For example,
+     `volume is in use - [<container id>]` means a container still uses the
+     volume. Stop and remove that container first, with the user's agreement,
+     rather than retrying with `force=true`.
+   - `was not created by this server`: see "What you can see and change".
+
+   If there's nothing after the tool name, don't guess the cause. Use a filtered
+   `list_*` call or `fetch_container_logs` to find out what went wrong.
 5. **Don't retry blindly.** Retry a failed call at most once, and only after
    changing something based on what you found. After 3 failures in a row, stop
    and ask the user.

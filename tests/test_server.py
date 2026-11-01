@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import docker
@@ -367,15 +368,31 @@ async def test_resources_prompt_validation_errors_and_lifetime(server, docker_cl
 
 
 @pytest.mark.anyio
-async def test_docker_exception_is_a_model_visible_tool_error(server, docker_client):
+async def test_docker_exception_is_a_model_visible_tool_error(
+    server, docker_client, monkeypatch
+):
     def fail(**_kwargs):
         raise docker.errors.APIError("daemon unavailable")
 
+    def in_use(**_kwargs):
+        raise docker.errors.APIError(
+            "409 Client Error",
+            response=SimpleNamespace(status_code=409, reason="Conflict"),
+            explanation="remove v: volume is in use - [abc123]",
+        )
+
     docker_client.containers.list = fail
+    monkeypatch.setattr(Object, "remove", lambda _self, **kwargs: in_use(**kwargs))
     async with Client(server, raise_exceptions=True) as client:
         result = await client.call_tool("list_containers", {})
+        assert result.is_error
+        assert "daemon unavailable" in result.content[0].text
+        result = await client.call_tool("remove_volume", {"volume_name": "v"})
     assert result.is_error
-    assert "daemon unavailable" in result.content[0].text
+    assert result.content[0].text == (
+        "Error executing tool remove_volume: "
+        "Conflict: remove v: volume is in use - [abc123]"
+    )
 
 
 @pytest.mark.anyio
